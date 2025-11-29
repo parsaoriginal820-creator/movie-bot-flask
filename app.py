@@ -2,74 +2,63 @@ import os
 from flask import Flask, request
 import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from utils.scraper import search_psarips, get_links_from_page
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 app = Flask(__name__)
+TOKEN = os.environ["BOT_TOKEN"]
+bot = telegram.Bot(TOKEN)
 
-TOKEN = os.environ.get("BOT_TOKEN")
-bot = telegram.Bot(token=TOKEN)
-application = Application.builder().token(TOKEN).build()
+# حالا utils رو بعد از deploy ایمپورت می‌کنیم
+from utils.scraper import search_psarips, get_links_from_page
 
-DOMAIN = "https://movie-bot-flask.vercel.app"  # بعد از deploy، این رو با دامنه خودت عوض کن
+dispatcher = Dispatcher(bot, None, workers=0)
 
-# هندلرها (همون کد قبلی)
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎬 سلام! اسم فیلم یا سریال بفرست تا لینک مستقیم بدم\nمثال: Oppenheimer")
+# هندلرها
+def start(update, context):
+    update.message.reply_text("🎬 سلام!\nاسم فیلم یا سریال بفرست تا لینک مستقیم بدم")
 
-async def search_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
-    await update.message.reply_chat_action("typing")
+def search(update, context):
+    query = update.message.text
+    context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
     results = search_psarips(query)
-    
     if not results:
-        await update.message.reply_text("چیزی پیدا نشد 😔\nدوباره امتحان کن")
+        update.message.reply_text("متأسفانه چیزی پیدا نشد 😔")
         return
+    keyboard = [[InlineKeyboardButton(r["title"][:60], callback_data=f"sel_{i}")] for i, r in enumerate(results[:8])]
+    update.message.reply_text("نتایج:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    keyboard = [[InlineKeyboardButton(res["title"][:50], callback_data=f"movie_{res['link']}")] for res in results]
-    await update.message.reply_text("نتایج جستجو:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def button(update, context):
     query = update.callback_query
-    await query.answer()
-    
-    if query.data.startswith("movie_"):
-        url = query.data.replace("movie_", "")
-        await query.edit_message_text("در حال استخراج لینک‌ها... ⏳")
-        
-        links = get_links_from_page(url)
-        
-        if not links:
-            await query.edit_message_text("لینک پیدا نشد 😢")
-            return
-            
-        text = "لینک‌های دانلود:\n\n"
-        keyboard = []
-        for i, link in enumerate(links, 1):
-            text += f"{i}. {link}\n\n"
-            keyboard.append([InlineKeyboardButton(f"لینک {i}", url=link)])
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+    query.answer()
+    idx = int(query.data.split("_")[1])
+    results = search_psarips(query.message.text.split("\n")[0])  # ساده
+    if idx >= len(results):
+        query.edit_message_text("خطا!")
+        return
+    page_url = results[idx]["link"]
+    query.edit_message_text("در حال گرفتن لینک‌ها...")
+    links = get_links_from_page(page_url)
+    if not links:
+        query.edit_message_text("لینک پیدا نشد 😢")
+        return
+    text = "لینک‌های دانلود:\n\n"
+    keyboard = [[InlineKeyboardButton(f"لینک {i+1}", url=l)] for i, l in enumerate(links)]
+    query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
-# اضافه کردن هندلرها
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movie))
-application.add_handler(CallbackQueryHandler(button_callback))
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
+dispatcher.add_handler(CallbackQueryHandler(button))
 
-# ورسل endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    application.process_update(update)
-    return 'ok'
+    dispatcher.process_update(update)
+    return 'ok', 200
 
-# ست کردن وب‌هوک (فقط یک‌بار اجرا کن)
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    webhook_url = f"{DOMAIN}/webhook"
-    bot.setWebhook(webhook_url)
-    return f"Webhook set to {webhook_url}"
+@app.route('/set_webhook')
+def set():
+    bot.set_webhook(url="https://movie-bot-flask.vercel.app/webhook")
+    return "Webhook set!"
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run()
